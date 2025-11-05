@@ -1,111 +1,154 @@
-import time
-from io import BytesIO
-from typing import List, Tuple
-from PIL import Image, ImageDraw
+# app.py
+from pathlib import Path
+from typing import List, Dict, Optional
+from PIL import Image
 import streamlit as st
-from streamlit_image_coordinates import streamlit_image_coordinates
 
-st.set_page_config(page_title="Spot-the-Difference MVP", layout="wide")
+# -----------------------------
+# 설정
+# -----------------------------
+BASE_DIR = Path("problems")
+LEFT_NAMES = ["image_left.png", "image_left.jpg", "image_left.jpeg"]
+RIGHT_NAMES = ["image_right.png", "image_right.jpg", "image_right.jpeg"]
+TITLE_NAME = "제목.txt"
+EXPLAIN_NAME = "해설.txt"
 
-IMG_NORMAL_PATH = "images/normal.png"
-IMG_LESION_PATH = "images/lesion.png"
+BOX_SIZE = 420
+BG_COLOR = (0, 0, 0)
+BUTTON_MAX = 16  # 1~16번
 
-# 정답 영역과 판정 반경(px)
-GT_RECTS: List[Tuple[int,int,int,int]] = [(300, 140, 360, 200)]
-RADIUS = 20
+st.set_page_config(page_title="X-ray Quiz", layout="wide")
 
-@st.cache_data
-def load_image(path: str) -> Image.Image:
-    return Image.open(path).convert("RGB")
+# -----------------------------
+# 유틸
+# -----------------------------
+def _read_text(path: Path) -> str:
+    # 윈도우 줄바꿈/UTF-8 BOM 제거 + 트림
+    txt = path.read_text(encoding="utf-8")
+    txt = txt.replace("\r\n", "\n").replace("\r", "\n").lstrip("\ufeff").rstrip()
+    return txt
 
-def point_in_expanded_rect(x, y, rect, r):
-    x1, y1, x2, y2 = rect
-    return (x1 - r) <= x <= (x2 + r) and (y1 - r) <= y <= (y2 + r)
+def _find_first_exist(folder: Path, candidates: List[str]) -> Optional[Path]:
+    for name in candidates:
+        p = folder / name
+        if p.exists():
+            return p
+    return None
 
-def score_clicks(clicks, rects, r):
-    used = set(); tp = 0
-    for (cx, cy) in clicks:
-        hit_idx = None
-        for i, rect in enumerate(rects):
-            if i in used:
-                continue
-            if point_in_expanded_rect(cx, cy, rect, r):
-                hit_idx = i; break
-        if hit_idx is not None:
-            tp += 1; used.add(hit_idx)
-    fp = max(0, len(clicks) - tp)
-    fn = len(rects) - len(used)
-    prec = tp/(tp+fp) if (tp+fp)>0 else 0.0
-    rec  = tp/(tp+fn) if (tp+fn)>0 else 0.0
-    f1   = 2*prec*rec/(prec+rec) if (prec+rec)>0 else 0.0
-    return {"tp": tp, "fp": fp, "fn": fn, "precision": prec, "recall": rec, "f1": f1}
+def fit_square(path: str, box_size: int = BOX_SIZE, bg_color=BG_COLOR) -> Image.Image:
+    img = Image.open(path).convert("RGB")
+    img.thumbnail((box_size, box_size), Image.LANCZOS)
+    canvas = Image.new("RGB", (box_size, box_size), bg_color)
+    x = (box_size - img.width) // 2
+    y = (box_size - img.height) // 2
+    canvas.paste(img, (x, y))
+    return canvas
 
-def draw_feedback(base_img: Image.Image, rects, clicks):
-    vis = base_img.copy()
-    d = ImageDraw.Draw(vis, "RGBA")
-    # 정답 박스
-    for (x1,y1,x2,y2) in rects:
-        d.rectangle((x1,y1,x2,y2), outline=(0,200,0,255), fill=(0,255,0,60), width=2)
-    # 클릭 포인트
-    for (cx, cy) in clicks:
-        d.ellipse((cx-6, cy-6, cx+6, cy+6), outline=(0,0,0,255), width=2)
-    return vis
+@st.cache_data(show_spinner=False)
+def scan_problems(base_dir: Path) -> List[Dict]:
+    items: List[Dict] = []
+    if not base_dir.exists():
+        return items
+    for sub in sorted([p for p in base_dir.iterdir() if p.is_dir()]):
+        left_img = _find_first_exist(sub, LEFT_NAMES)
+        right_img = _find_first_exist(sub, RIGHT_NAMES)
+        title_txt = sub / TITLE_NAME
+        expl_txt = sub / EXPLAIN_NAME
+        if (left_img is None) or (right_img is None) or (not title_txt.exists()) or (not expl_txt.exists()):
+            continue
+        items.append({
+            "folder": sub.name,
+            "title": _read_text(title_txt),
+            "image_left_path": str(left_img),
+            "image_right_path": str(right_img),
+            "explanation": _read_text(expl_txt),
+        })
+    return items
 
-# 데이터 로드
-img_normal = load_image(IMG_NORMAL_PATH)
-img_lesion = load_image(IMG_LESION_PATH)
-W, H = img_lesion.size
+# -----------------------------
+# 앱 UI
+# -----------------------------
+st.markdown(
+    "<h1 style='text-align:center; margin-top:30px; margin-bottom:40px;'>X-ray Quiz</h1>",
+    unsafe_allow_html=True
+)
 
-# 상태 초기화
-if "clicks" not in st.session_state:
-    st.session_state.clicks = []
-if "t0" not in st.session_state:
-    st.session_state.t0 = time.time()
-
-st.title("틀린그림찾기 — 최소 실행 버전(MVP)")
-st.caption("우측 이미지를 클릭해 포인트를 추가하십시오. [제출]로 채점합니다.")
-
-colL, colR = st.columns(2, gap="large")
-
-with colL:
-    st.subheader("Normal")
-    st.image(img_normal, caption="참고용", use_container_width=False)
-
-with colR:
-    st.subheader("Lesion (클릭 대상)")
-    # 현재까지의 클릭을 시각화한 오버레이 이미지 생성
-    overlay = draw_feedback(img_lesion, [], st.session_state.clicks)
-    # 이미지를 클릭하여 좌표 1개를 반환
-    coord = streamlit_image_coordinates(overlay, key="lesion_click")
-    # 클릭이 발생하면 저장
-    if coord and ("x" in coord and "y" in coord):
-        st.session_state.clicks.append((int(coord["x"]), int(coord["y"])))
+with st.sidebar:
+    if st.button("문제 목록 다시 불러오기", use_container_width=True):
+        scan_problems.clear()
         st.rerun()
 
-# 조작 버튼
-b1, b2, b3 = st.columns(3)
-with b1:
-    if st.button("되돌리기(Undo)"):
-        if st.session_state.clicks:
-            st.session_state.clicks.pop()
-        st.rerun()
-with b2:
-    if st.button("초기화(Reset)"):
-        st.session_state.clicks = []
-        st.session_state.t0 = time.time()
-        st.rerun()
-with b3:
-    submitted = st.button("제출", type="primary")
+problems = scan_problems(BASE_DIR)
+if not problems:
+    st.error("표시할 문제가 없습니다. 'problems/' 폴더를 확인하세요.")
+    st.stop()
 
-# 결과
-st.write(f"현재 클릭 수: {len(st.session_state.clicks)}")
-if submitted:
-    time_ms = int((time.time() - st.session_state.t0) * 1000)
-    result = score_clicks(st.session_state.clicks, GT_RECTS, RADIUS)
-    st.write(f"**TP {result['tp']} / FP {result['fp']} / FN {result['fn']}**")
-    st.write(
-        f"Precision {result['precision']:.2f} | Recall {result['recall']:.2f} "
-        f"| F1 {result['f1']:.2f} | Time {time_ms} ms"
-    )
-    st.image(draw_feedback(img_lesion, GT_RECTS, st.session_state.clicks),
-             caption="정답(녹색)과 클릭(검정) 오버레이")
+if "sel" not in st.session_state:
+    st.session_state.sel = 0
+if "answer" not in st.session_state:
+    st.session_state.answer = None
+
+def _reset_selection():
+    st.session_state.answer = None
+
+# -----------------------------
+# 상단: 문제 선택 버튼(1~16)
+# -----------------------------
+st.markdown("<div style='text-align:center; font-size:20px; font-weight:600; margin-bottom:20px;'>문제 선택</div>", unsafe_allow_html=True)
+cols = st.columns(BUTTON_MAX)
+total = len(problems)
+for i, col in enumerate(cols):
+    label = f"{i+1}"
+    enabled = i < total
+    with col:
+        if st.button(label, use_container_width=True, key=f"btn_{i}", disabled=not enabled):
+            st.session_state.sel = i
+            _reset_selection()
+            st.rerun()
+
+st.markdown("<div style='margin-top:25px;'></div>", unsafe_allow_html=True)
+
+sel = min(st.session_state.sel, len(problems) - 1)
+p = problems[sel]
+
+# -----------------------------
+# 문제 제목(작게) + 여백
+# -----------------------------
+st.markdown(
+    f"<h4 style='text-align:center; margin-top:10px; margin-bottom:25px;'>{p['title']}</h4>",
+    unsafe_allow_html=True
+)
+
+# -----------------------------
+# 이미지(규칙적 간격 + 동일 크기)
+# -----------------------------
+left_sp, colA, gap, colB, right_sp = st.columns([1, 4, 0.8, 4, 1])
+with colA:
+    st.image(fit_square(p["image_left_path"]), width=BOX_SIZE)
+with gap:
+    st.write("")
+with colB:
+    st.image(fit_square(p["image_right_path"]), width=BOX_SIZE)
+
+st.markdown("<div style='margin-top:35px;'></div>", unsafe_allow_html=True)
+
+# -----------------------------
+# O/X 버튼(초기 미선택, 누르면 해설 표시)
+# -----------------------------
+bcol1, bcol2, _ = st.columns([1, 1, 6])
+with bcol1:
+    if st.button("O", use_container_width=True, key=f"ans_o_{sel}"):
+        st.session_state.answer = "O"
+with bcol2:
+    if st.button("X", use_container_width=True, key=f"ans_x_{sel}"):
+        st.session_state.answer = "X"
+
+# -----------------------------
+# 해설: 줄바꿈 보존
+# -----------------------------
+if st.session_state.answer in ["O", "X"]:
+    st.markdown("<div style='margin-top:25px;'></div>", unsafe_allow_html=True)
+    st.markdown("**해설**")
+    # 단락/줄바꿈 보존: \n → <br>
+    expl_html = p["explanation"].replace("\n", "<br>")
+    st.markdown(expl_html, unsafe_allow_html=True)
