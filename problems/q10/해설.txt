@@ -1,0 +1,3 @@
+정답: O
+촬영법: Elbow Lateral projection
+설명: 팔꿈치를 90° 굽히고 손바닥이 안쪽으로 향한 lateral 자세에서는 olecranon이 뚜렷하게 보임.
